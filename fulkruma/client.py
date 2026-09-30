@@ -99,6 +99,10 @@ class FulkrumaClient:
         self.stats = StatsResources(self)
         self.webhooks = WebhooksResources(self)
         self.admin = AdminResources(self)
+        # Every feature route, one method each (generated from the API spec).
+        from .api_generated import GeneratedApi
+
+        self.api = GeneratedApi(self)
 
     # ─── Lifecycle ───────────────────────────────────────────────────────
 
@@ -147,11 +151,11 @@ class FulkrumaClient:
         *,
         method: str,
         path: str,
-        body: Optional[str],
+        body: Optional[bytes],
         idempotency_key: Optional[str],
     ) -> Dict[str, str]:
         ts = str(int(time.time()))
-        body_hash = hashlib.sha256((body or "").encode("utf-8")).hexdigest()
+        body_hash = hashlib.sha256(body or b"").hexdigest()
         idem = f"\n{idempotency_key}" if idempotency_key else ""
         string_to_sign = f"{method.upper()}\n{path}\n{ts}\n{body_hash}{idem}"
         signature = hmac.new(
@@ -160,6 +164,23 @@ class FulkrumaClient:
             hashlib.sha256,
         ).hexdigest()
         return {"signature": signature, "timestamp": ts}
+
+    def _apigen_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        query: Optional[Dict[str, Any]] = None,
+        body: Any = None,
+    ) -> Any:
+        """The call behind ``client.api.*`` (api_generated.py): signed like every other
+        request, with an idempotency key on writes."""
+        return self.request(
+            method,
+            path + self._qs(dict(query or {})),
+            body=body,
+            idempotency_key=None if method.upper() == "GET" else self._gen_idem(),
+        )
 
     # ─── Low-level request ───────────────────────────────────────────────
 
@@ -172,7 +193,13 @@ class FulkrumaClient:
         idempotency_key: Optional[str] = None,
         on_behalf_of: Optional[str] = None,
     ) -> Any:
-        body_json = json.dumps(body, separators=(",", ":")) if body is not None else None
+        # The signature covers exactly the bytes sent: compact UTF-8 JSON, or nothing
+        # when there is no body (an empty dict or list is sent as no body at all).
+        body_json = (
+            json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+            if body is not None and body != {} and body != []
+            else None
+        )
         signed = self._sign(
             method=method, path=path, body=body_json, idempotency_key=idempotency_key,
         )
